@@ -1,0 +1,381 @@
+const express = require('express');
+const mysql = require('mysql2');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const FormData = require('form-data');
+const axios = require('axios');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+const QRCode = require('qrcode');
+
+const app = express();
+const port = 3000;
+
+// JWT Secret Key
+const JWT_SECRET = 'your-secret-key-here';
+
+// ImgBB API Key
+const IMGBB_API_KEY = '8afd0d8543f84fe58a0072291f88477a';
+
+// CORS configuration - more permissive for development
+app.use(cors({
+  origin: true, // Allow all origins during development
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// Middleware
+app.use(express.json());
+app.use('/uploads', express.static('uploads'));
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something broke!' });
+});
+
+// Authentication middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied. No token provided.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token.' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// MySQL connection
+const db = mysql.createConnection({
+  host: 'localhost',
+  user: 'root',
+  password: '',  // default WAMP password is empty
+  database: 'gatekeeper_db'
+});
+
+db.connect((err) => {
+  if (err) {
+    console.error('Error connecting to MySQL:', err);
+    return;
+  }
+  console.log('Connected to MySQL database: gatekeeper_db');
+  
+  // Create admin table if it doesn't exist
+  const createAdminTable = `
+    CREATE TABLE IF NOT EXISTS admins (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(50) UNIQUE NOT NULL,
+      password VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  
+  db.query(createAdminTable, (err) => {
+    if (err) {
+      console.error('Error creating admin table:', err);
+      return;
+    }
+    console.log('Admin table checked/created successfully');
+    
+    // Check if default admin exists
+    const checkAdmin = 'SELECT * FROM admins WHERE username = ?';
+    db.query(checkAdmin, ['admin'], async (err, results) => {
+      if (err) {
+        console.error('Error checking admin:', err);
+        return;
+      }
+      
+      if (results.length === 0) {
+        // Create default admin if not exists
+        const hashedPassword = await bcrypt.hash('gate808', 10);
+        const insertAdmin = 'INSERT INTO admins (username, password) VALUES (?, ?)';
+        db.query(insertAdmin, ['admin', hashedPassword], (err) => {
+          if (err) {
+            console.error('Error creating default admin:', err);
+            return;
+          }
+          console.log('Default admin created successfully');
+        });
+      } else {
+        console.log('Default admin already exists');
+      }
+    });
+
+    // Check all admin accounts
+    db.query('SELECT id, username, created_at FROM admins', (err, results) => {
+      if (err) {
+        console.error('Error checking admin accounts:', err);
+        return;
+      }
+      console.log('Current admin accounts:', results);
+    });
+  });
+
+  // Create student_logs table if it doesn't exist
+  db.query(`
+    CREATE TABLE IF NOT EXISTS student_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      student_id INT NOT NULL,
+      entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      exit_time TIMESTAMP NULL,
+      status ENUM('entered', 'exited') DEFAULT 'entered',
+      FOREIGN KEY (student_id) REFERENCES students(id)
+    )
+  `, (err) => {
+    if (err) {
+      console.error('Error creating student_logs table:', err);
+      return;
+    }
+    console.log('Student logs table checked/created successfully');
+  });
+});
+
+// Configure multer for temporary file storage
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'));
+    }
+  }
+});
+
+// Function to upload image to ImgBB
+async function uploadToImgBB(imageBuffer) {
+  try {
+    const formData = new FormData();
+    formData.append('image', imageBuffer.toString('base64'));
+
+    const response = await axios.post(
+      `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+        },
+      }
+    );
+
+    return response.data.data.url;
+  } catch (error) {
+    console.error('Error uploading to ImgBB:', error);
+    throw new Error('Failed to upload image to cloud storage');
+  }
+}
+
+// Function to generate QR code
+async function generateQRCode(studentId) {
+  try {
+    // Generate QR code as data URL
+    const qrDataUrl = await QRCode.toDataURL(studentId.toString());
+    return qrDataUrl;
+  } catch (error) {
+    console.error('Error generating QR code:', error);
+    throw new Error('Failed to generate QR code');
+  }
+}
+
+// Routes
+// Login route
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  console.log('Login attempt for username:', username);
+
+  try {
+    const query = 'SELECT * FROM admins WHERE username = ?';
+    db.query(query, [username], async (err, results) => {
+      if (err) {
+        console.error('Database error during login:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      console.log('Database query results:', results);
+
+      if (results.length === 0) {
+        console.log('No admin found with username:', username);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const admin = results[0];
+      console.log('Found admin:', { id: admin.id, username: admin.username });
+      
+      const validPassword = await bcrypt.compare(password, admin.password);
+      console.log('Password validation result:', validPassword);
+
+      if (!validPassword) {
+        console.log('Invalid password for username:', username);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const token = jwt.sign({ id: admin.id, username: admin.username }, JWT_SECRET);
+      console.log('Login successful for username:', username);
+      res.json({ token });
+    });
+  } catch (error) {
+    console.error('Server error during login:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get all students (protected route)
+app.get('/api/students', authenticateToken, (req, res) => {
+  const query = 'SELECT * FROM students';
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Error fetching students:', err);
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    res.json(results);
+  });
+});
+
+// Add new student (protected route)
+app.post('/api/students', authenticateToken, upload.single('photo'), async (req, res) => {
+  try {
+    console.log('Received student data:', req.body);
+    console.log('Received file:', req.file);
+
+    const { id, fullname, major } = req.body;
+    
+    if (!req.file) {
+      console.log('No file provided');
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Upload image to ImgBB
+    console.log('Uploading image to ImgBB...');
+    const imageUrl = await uploadToImgBB(req.file.buffer);
+    console.log('Image uploaded successfully:', imageUrl);
+
+    // Generate QR code
+    console.log('Generating QR code for ID:', id);
+    const qrCode = await generateQRCode(id);
+    console.log('QR code generated successfully');
+
+    // Store student data with ImgBB URL and QR code
+    const query = 'INSERT INTO students (id, fullname, major, photo, qr_code) VALUES (?, ?, ?, ?, ?)';
+    console.log('Executing database query with values:', { id, fullname, major, imageUrl, qrCode });
+    
+    db.query(query, [id, fullname, major, imageUrl, qrCode], (err, result) => {
+      if (err) {
+        console.error('Database error:', err);
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      console.log('Student added successfully:', result);
+      res.json({ 
+        id: result.insertId, 
+        message: 'Student added successfully',
+        qrCode 
+      });
+    });
+  } catch (error) {
+    console.error('Error in student addition:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get student by ID
+app.get('/api/students/:id', async (req, res) => {
+  const studentId = req.params.id;
+  
+  try {
+    // Get student information
+    const studentQuery = 'SELECT * FROM students WHERE id = ?';
+    db.query(studentQuery, [studentId], (err, results) => {
+      if (err) {
+        console.error('Error fetching student:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ error: 'Student not found' });
+      }
+
+      const student = results[0];
+
+      // Get latest log entry
+      const logQuery = 'SELECT * FROM student_logs WHERE student_id = ? ORDER BY entry_time DESC LIMIT 1';
+      db.query(logQuery, [studentId], (err, logResults) => {
+        if (err) {
+          console.error('Error fetching student log:', err);
+          return res.status(500).json({ error: 'Database error' });
+        }
+
+        if (logResults.length > 0) {
+          student.entry_time = logResults[0].entry_time;
+          student.exit_time = logResults[0].exit_time;
+          student.status = logResults[0].status;
+        }
+
+        res.json(student);
+      });
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Log student entry
+app.post('/api/students/:id/entry', async (req, res) => {
+  const studentId = req.params.id;
+  const { entry_time } = req.body;
+
+  try {
+    const query = 'INSERT INTO student_logs (student_id, entry_time, status) VALUES (?, ?, ?)';
+    db.query(query, [studentId, entry_time, 'entered'], (err, result) => {
+      if (err) {
+        console.error('Error logging student entry:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json({ message: 'Entry logged successfully' });
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Log student exit
+app.post('/api/students/:id/exit', async (req, res) => {
+  const studentId = req.params.id;
+  const { exit_time } = req.body;
+
+  try {
+    const query = 'UPDATE student_logs SET exit_time = ?, status = ? WHERE student_id = ? AND status = ?';
+    db.query(query, [exit_time, 'exited', studentId, 'entered'], (err, result) => {
+      if (err) {
+        console.error('Error logging student exit:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json({ message: 'Exit logged successfully' });
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start server
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+  console.log(`CORS enabled for http://localhost:5173`);
+});
