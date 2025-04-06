@@ -9,7 +9,11 @@
     </div>
     <div v-else>
       <StudentForm @student-added="refreshStudents" />
-      <StudentList :students="students" />
+      <StudentList 
+        :students="students" 
+        @student-updated="refreshStudents"
+        @student-deleted="refreshStudents"
+      />
     </div>
   </div>
 </template>

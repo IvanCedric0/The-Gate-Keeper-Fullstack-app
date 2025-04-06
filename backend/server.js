@@ -8,6 +8,7 @@ const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const QRCode = require('qrcode');
+const fs = require('fs');
 
 const app = express();
 const port = 3000;
@@ -355,6 +356,97 @@ app.post('/api/students/:id/exit', async (req, res) => {
     console.error('Error:', error);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Update student route
+app.put('/api/students/:id', authenticateToken, upload.single('photo'), async (req, res) => {
+  const { id } = req.params;
+  const { fullname, major } = req.body;
+  let photoPath = null;
+
+  try {
+    // If a new photo was uploaded
+    if (req.file) {
+      photoPath = `http://localhost:3000/uploads/${path.basename(req.file.path)}`;
+    }
+
+    // Build the update query based on what's being updated
+    let updateFields = [];
+    let queryParams = [];
+
+    if (fullname) {
+      updateFields.push('fullname = ?');
+      queryParams.push(fullname);
+    }
+    if (major) {
+      updateFields.push('major = ?');
+      queryParams.push(major);
+    }
+    if (photoPath) {
+      updateFields.push('photo = ?');
+      queryParams.push(photoPath);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    queryParams.push(id); // Add id for WHERE clause
+
+    const query = `UPDATE students SET ${updateFields.join(', ')} WHERE id = ?`;
+    
+    db.query(query, queryParams, (err, result) => {
+      if (err) {
+        console.error('Error updating student:', err);
+        return res.status(500).json({ error: 'Failed to update student' });
+      }
+      res.json({ message: 'Student updated successfully' });
+    });
+  } catch (error) {
+    console.error('Error in update route:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Delete student route
+app.delete('/api/students/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+
+  // First, get the student's photo path
+  db.query('SELECT photo FROM students WHERE id = ?', [id], (err, results) => {
+    if (err) {
+      console.error('Error fetching student photo:', err);
+      return res.status(500).json({ error: 'Failed to fetch student data' });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const photoPath = results[0].photo;
+    
+    // Delete the student from the database
+    db.query('DELETE FROM students WHERE id = ?', [id], (err, result) => {
+      if (err) {
+        console.error('Error deleting student:', err);
+        return res.status(500).json({ error: 'Failed to delete student' });
+      }
+
+      // If the student had a photo, delete it from the uploads directory
+      if (photoPath) {
+        const filename = path.basename(photoPath);
+        const filePath = path.join(__dirname, 'uploads', filename);
+        
+        fs.unlink(filePath, (err) => {
+          if (err) {
+            console.error('Error deleting photo file:', err);
+          }
+        });
+      }
+
+      res.json({ message: 'Student deleted successfully' });
+    });
+  });
 });
 
 // Start server
