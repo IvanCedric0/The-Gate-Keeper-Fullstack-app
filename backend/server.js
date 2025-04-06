@@ -28,7 +28,7 @@ app.use(cors({
 
 // Middleware
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -139,8 +139,18 @@ db.connect((err) => {
   });
 });
 
-// Configure multer for temporary file storage
-const storage = multer.memoryStorage();
+// Configure multer for local file storage
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'uploads/')
+  },
+  filename: function (req, file, cb) {
+    // Generate unique filename using timestamp and original extension
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+    cb(null, uniqueSuffix + path.extname(file.originalname))
+  }
+});
+
 const upload = multer({ 
   storage: storage,
   limits: {
@@ -149,35 +159,12 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     // Accept only image files
     if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
+      cb(null, true)
     } else {
-      cb(new Error('Only image files are allowed!'));
+      cb(new Error('Only image files are allowed!'))
     }
   }
-});
-
-// Function to upload image to ImgBB
-async function uploadToImgBB(imageBuffer) {
-  try {
-    const formData = new FormData();
-    formData.append('image', imageBuffer.toString('base64'));
-
-    const response = await axios.post(
-      `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
-      formData,
-      {
-        headers: {
-          ...formData.getHeaders(),
-        },
-      }
-    );
-
-    return response.data.data.url;
-  } catch (error) {
-    console.error('Error uploading to ImgBB:', error);
-    throw new Error('Failed to upload image to cloud storage');
-  }
-}
+})
 
 // Function to generate QR code
 async function generateQRCode(studentId) {
@@ -259,21 +246,17 @@ app.post('/api/students', authenticateToken, upload.single('photo'), async (req,
       return res.status(400).json({ error: 'No image file provided' });
     }
 
-    // Upload image to ImgBB
-    console.log('Uploading image to ImgBB...');
-    const imageUrl = await uploadToImgBB(req.file.buffer);
-    console.log('Image uploaded successfully:', imageUrl);
-
     // Generate QR code
     console.log('Generating QR code for ID:', id);
     const qrCode = await generateQRCode(id);
     console.log('QR code generated successfully');
 
-    // Store student data with ImgBB URL and QR code
+    // Store student data with QR code
     const query = 'INSERT INTO students (id, fullname, major, photo, qr_code) VALUES (?, ?, ?, ?, ?)';
-    console.log('Executing database query with values:', { id, fullname, major, imageUrl, qrCode });
+    const photoPath = `http://localhost:3000/uploads/${path.basename(req.file.path)}`;
+    console.log('Executing database query with values:', { id, fullname, major, photoPath, qrCode });
     
-    db.query(query, [id, fullname, major, imageUrl, qrCode], (err, result) => {
+    db.query(query, [id, fullname, major, photoPath, qrCode], (err, result) => {
       if (err) {
         console.error('Database error:', err);
         res.status(500).json({ error: err.message });
