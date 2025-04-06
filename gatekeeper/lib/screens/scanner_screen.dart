@@ -211,7 +211,7 @@ class ScannerOverlay extends CustomPainter {
         Rect.fromLTRB(left, top, right, bottom), borderPaint);
 
     // Draw corner markers
-    final double markerLength = 20;
+    const double markerLength = 20;
     
     // Top left corner
     canvas.drawLine(Offset(left, top + markerLength), Offset(left, top), borderPaint);

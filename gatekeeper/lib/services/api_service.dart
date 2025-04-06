@@ -9,7 +9,9 @@ class ApiService {
     if (kIsWeb) {
       return 'http://localhost:3000/api';
     } else {
-      return 'http://192.168.1.5:3000/api';
+      // Use 10.0.2.2 for emulator, and your computer's IP for physical device
+      // You can find your IP by running 'ipconfig' on Windows or 'ifconfig' on Mac/Linux
+      return 'http://192.168.1.5:3000/api';  // Replace with your computer's IP address
     }
   }
 
